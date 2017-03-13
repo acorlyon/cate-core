@@ -543,8 +543,9 @@ class EsaCciOdpDataSource(DataSource):
             selected_file_list = self._file_list
         return selected_file_list
 
-    def open_dataset(self, time_range: Tuple[datetime, datetime]=None,
-                     protocol: str=None) -> xr.Dataset:
+    def get_datasets_uri(self, time_range: Tuple[datetime, datetime], protocol: str = None,
+                         monitor: Monitor = Monitor.NONE):
+
         if protocol is None:
             protocol = _ODP_PROTOCOL_HTTP
         if protocol not in self.protocols:
@@ -567,9 +568,17 @@ class EsaCciOdpDataSource(DataSource):
             for file in files:
                 if not os.path.exists(file):
                     raise IOError('Missing local data files, consider synchronizing the dataset first.')
+        return files
+
+    def open_dataset(self, time_range: Tuple[datetime, datetime]=None,
+                     protocol: str=None) -> xr.Dataset:
+
+        files = self.get_datasets_uri(time_range, protocol)
 
         try:
-            return open_xarray_dataset(files)
+            # todo: restore prev version
+            # return xr.open_dataset(files[0], chunks={'lat': 10, 'lon': 10})
+            return open_xarray_dataset(files)  # decode_cf=False, decode_times=False,
         except OSError as e:
             raise IOError("Files: {} caused:\nOSError({}): {}".format(files, e.errno, e.strerror))
 
