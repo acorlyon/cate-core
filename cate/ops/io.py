@@ -21,20 +21,16 @@
 
 import json
 import os.path
-from _threading_local import local
 from abc import ABCMeta
 from typing import List, Tuple
-from types import LambdaType
 
 import xarray as xr
-from xarray import Dataset
 import pandas as pd
 
 from cate.core.ds import DATA_STORE_REGISTRY, DataStore, DataSource
 from cate.core.objectio import OBJECT_IO_REGISTRY, ObjectIO
 from cate.core.op import OP_REGISTRY, op_input, op
 from cate.util.monitor import Monitor
-from cate.ds.local import LocalFilePatternDataStore
 
 
 @op(tags=['input'])
@@ -111,10 +107,10 @@ def create_local_synced_datasource(name: str, selected_variables: List[str]= Non
     :return:
     """
     from xarray.backends.netCDF4_ import NetCDF4DataStore
-    from cate.ds.local import get_data_store_path
+    from cate.ds.local import LocalODPSyncedDataStore, get_data_store_path
 
-    local_dstore = DATA_STORE_REGISTRY.get_data_store('local')  # type: LocalFilePatternDataStore
-    if not isinstance(local_dstore, LocalFilePatternDataStore):
+    local_dstore = DATA_STORE_REGISTRY.get_data_store('synced')  # type: LocalODPSyncedDataStore
+    if not isinstance(local_dstore, LocalODPSyncedDataStore):
         raise TypeError("Couldn't find local data store")
 
     remote_dstore = DATA_STORE_REGISTRY.get_data_store('esa_cci_odp')  # type: DataStore
@@ -133,12 +129,18 @@ def create_local_synced_datasource(name: str, selected_variables: List[str]= Non
         encoding_update = {'zlib': True}
         if compression_level:
             encoding_update.setdefault('complevel', compression_level)
-
-    local_dsources = local_dstore.query('local.{}'.format(local_datastore_name), monitor)  # type: [DataSource]
+    local_dsources = local_dstore.query(local_datastore_name, monitor)  # type: [DataSource]
     if local_dsources:
         raise ValueError("Could't create specified local data source: {}".format(local_datastore_name))
-    local_dstore.add_opendap_pattern(local_datastore_name, name, selected_variables, time_range, lat_lon)
-    local_dsource = local_dstore.query('local.{}'.format(local_datastore_name), monitor)  # type: DataSource
+    local_dsource_name = local_dstore.add_opendap_pattern(local_datastore_name,
+                                                          name, selected_variables, time_range, lat_lon)
+    print("local_dsource_name")
+    print (local_dsource_name)
+    local_dsources = local_dstore.query(local_dsource_name, monitor)  # type: LocalODPSyncedDataSource
+
+    print(local_dsources)
+
+    local_dsource = local_dsources[0]
 
     remote_datasets_uri = remote_dsource.get_datasets_uri(time_range=time_range, protocol='OPENDAP')
 
@@ -168,15 +170,21 @@ def create_local_synced_datasource(name: str, selected_variables: List[str]= Non
             if compression_enabled:
                 var_dataset.variables.get(sel_var_name).encoding.update(encoding_update)
             local_netcdf.store_dataset(var_dataset)
+            monitor.progress()
 
         local_netcdf.sync()
 
         remote_netcdf.close()
+
+        print(local_netcdf.attrs.get('start_time'))
+
+
+        local_dsource.add_dataset(local_filepath, local_netcdf.attrs.get('start_time'))
+
         local_netcdf.close()
 
-        local_dsource.add_dataset(local_filepath, local_netcdf.get('start_time'))
-
     local_dsource.save()
+    monitor.done()
 
     return local_datastore_name
 
