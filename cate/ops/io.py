@@ -34,7 +34,6 @@ from cate.core.ds import DATA_STORE_REGISTRY, DataStore, DataSource
 from cate.core.objectio import OBJECT_IO_REGISTRY, ObjectIO
 from cate.core.op import OP_REGISTRY, op_input, op
 from cate.util.monitor import Monitor
-#from cate.ds.esa_cci_odp import EsaCciOdpDataStore
 from cate.ds.local import LocalFilePatternDataStore
 
 
@@ -84,7 +83,15 @@ def save_dataset(ds: xr.Dataset, file: str, format: str = None):
 
 # noinspection PyShadowingBuiltins
 @op(tags=['input'])
-@op_input('ds')
+@op(tags=['output'], no_cache=True)
+@op_input('name')
+@op_input('selected_variables')
+@op_input('time_range')
+@op_input('lat_lon')
+@op_input('local_datastore_name')
+@op_input('local_path')
+@op_input('compression_enabled')
+@op_input('compression_level')
 def create_local_synced_datasource(name: str, selected_variables: List[str]= None, time_range: Tuple[int, int] = None,
                                    lat_lon: Tuple[Tuple[float, float], Tuple[float, float]] = None,
                                    local_datastore_name: str = None, local_path: str = None,
