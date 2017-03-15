@@ -1,10 +1,12 @@
 from typing import Sequence
-from unittest import TestCase
+from unittest import TestCase, skipIf
 import os.path as op
+import os
 
 import xarray as xr
 
 import cate.core.ds as ds
+from cate.util import Monitor
 
 _TEST_DATA_PATH = op.join(op.dirname(op.realpath(__file__)), 'test_data')
 
@@ -14,7 +16,7 @@ class SimpleDataStore(ds.DataStore):
         super().__init__(name)
         self._data_sources = list(data_sources)
 
-    def query(self, name=None) -> Sequence[ds.DataSource]:
+    def query(self, name=None, monitor: Monitor = Monitor.NONE) -> Sequence[ds.DataSource]:
         return [ds for ds in self._data_sources if ds.matches_filter(name)]
 
     def _repr_html_(self):
@@ -134,6 +136,7 @@ class IOTest(TestCase):
         self.assertIsNotNone(data_sources)
         self.assertEqual(len(data_sources), 0)
 
+    @skipIf(os.environ.get('CATE_DISABLE_WEB_TESTS', None) == '1', 'CATE_DISABLE_WEB_TESTS = 1')
     def test_open_dataset(self):
         with self.assertRaises(ValueError) as cm:
             ds.open_dataset(None)
@@ -153,6 +156,7 @@ class IOTest(TestCase):
         self.assertIsInstance(dataset2, xr.Dataset)
         self.assertEqual(42, dataset2.a.values)
 
+    @skipIf(os.environ.get('CATE_DISABLE_WEB_TESTS', None) == '1', 'CATE_DISABLE_WEB_TESTS = 1')
     def test_open_dataset_duplicated_names(self):
         try:
             ds_a1 = SimpleDataSource('duplicate')
@@ -168,6 +172,8 @@ class IOTest(TestCase):
     def test_autochunking(self):
         path_large = op.join(_TEST_DATA_PATH, 'large', '*.nc')
         path_small = op.join(_TEST_DATA_PATH, 'small', '*.nc')
+        print(path_large)
+        print(path_small)
         ds_large = ds.open_xarray_dataset(path_large)
         ds_small = ds.open_xarray_dataset(path_small)
         large_expected = {'lat': (1800, 1800), 'time': (1,), 'bnds': (2,),

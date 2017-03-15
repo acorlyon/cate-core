@@ -122,12 +122,12 @@ class DataSource(metaclass=ABCMeta):
         """The data :py:class:`Schema` for any dataset provided by this data source or ``None`` if unknown."""
         return None
 
-    def temporal_coverage(self, monitor: Monitor=Monitor.NONE) -> Optional[Tuple[int, int]]:
+    def temporal_coverage(self, monitor: Monitor=Monitor.NONE) -> Optional[Tuple[datetime, datetime]]:
         """
-        The temporal coverage as tuple (*start*, *end*) where *start* and *and* are ``datetime`` instances.
+        The temporal coverage as tuple (*start*, *end*) where *start* and *end* are UTC ``datetime`` instances.
 
         :param monitor: a progress monitor.
-        :return ``None`` if the temporal coverage is unknown.
+        :return A tuple of (*start*, *end*) UTC ``datetime`` instances or ``None`` if the temporal coverage is unknown.
         """
         return None
 
@@ -172,8 +172,8 @@ class DataSource(metaclass=ABCMeta):
              monitor: Monitor=Monitor.NONE) -> Tuple[int, int]:
         """
         Allows to synchronize remote data with locally stored data.
-        Availability of synchornization feature depends on protocol type and
-        datasource implementation.
+        Availability of synchronization feature depends on protocol type and
+        data source implementation.
         The default implementation does nothing.
 
         :param time_range: An optional tuple comprising a start and end date,
@@ -477,11 +477,12 @@ def open_xarray_dataset(paths, concat_dim='time', **kwargs) -> xr.Dataset:
     # Find number of chunks as the closest larger squared number (1,4,9,..)
     try:
         temp_ds = xr.open_dataset(paths[0])
-    except OSError:
+    except (OSError, RuntimeError):
+        # netcdf4 >=1.2.2 raises RuntimeError
         # We have a glob not a list
         temp_ds = xr.open_dataset(glob.glob(paths)[0])
 
-    n_chunks = ceil(sqrt(temp_ds.nbytes/threshold))**2
+    n_chunks = ceil(sqrt(temp_ds.nbytes / threshold)) ** 2
 
     if n_chunks == 1:
         # The file size is fine
@@ -494,6 +495,15 @@ def open_xarray_dataset(paths, concat_dim='time', **kwargs) -> xr.Dataset:
     lon = get_lon_dim_name(temp_ds)
     n_lat = len(temp_ds[lat])
     n_lon = len(temp_ds[lon])
+
+    # temp_ds is no longer used
+    temp_ds.close()
+
+    if n_chunks == 1:
+        # The file size is fine
+        return xr.open_mfdataset(paths, concat_dim=concat_dim, **kwargs)
+
+    divisor = sqrt(n_chunks)
 
     # Chunking will pretty much 'always' be 2x2, very rarely 3x3 or 4x4. 5x5
     # would imply an uncompressed single file of ~6GB! All expected grids

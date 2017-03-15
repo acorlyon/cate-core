@@ -1,4 +1,5 @@
 import unittest
+import os
 
 from cate.core.wsmanag import FSWorkspaceManager
 from cate.util.monitor import Monitor
@@ -9,12 +10,14 @@ class WebSocketServiceTest(unittest.TestCase):
     def setUp(self):
         self.service = WebSocketService(FSWorkspaceManager())
 
+    @unittest.skipIf(os.environ.get('CATE_DISABLE_WEB_TESTS', None) == '1', 'CATE_DISABLE_WEB_TESTS = 1')
     def test_get_data_stores(self):
         data_stores = self.service.get_data_stores()
         self.assertIsInstance(data_stores, list)
         self.assertGreater(len(data_stores), 1)
         self.assertIn('local', [ds['id'] for ds in data_stores])
 
+    @unittest.skipIf(os.environ.get('CATE_DISABLE_WEB_TESTS', None) == '1', 'CATE_DISABLE_WEB_TESTS = 1')
     def test_get_data_sources(self):
         data_stores = self.service.get_data_stores()
         for ds in data_stores:
