@@ -135,8 +135,68 @@ class LocalFilePatternSourceTest(unittest.TestCase):
         self.assertEqual(self.ds4.temporal_coverage(), None)
 
     def test_to_json_dict(self):
-==== BASE ====
-        self.assertEqual(self.ds1.to_json_dict(), OrderedDict([('name', 'ozone'), ('files', ['/DATA/ozone/*/*.nc'])]))
-        self.assertEqual(self.ds2.to_json_dict(), OrderedDict(
-            [('name', 'aerosol'), ('files', ["/DATA/aerosol/*/A*.nc", "/DATA/aerosol/*/B*.nc"])]))
-==== BASE ====
+        self.assertEqual(self.ds1.to_json_dict().get('name'), 'ozone')
+        self.assertEqual(self.ds1.to_json_dict().get('files'),
+                         [('/DATA/ozone/*/*.nc', None)])
+
+        self.assertEqual(self.ds2.to_json_dict().get('name'), 'aerosol')
+        self.assertEqual(self.ds2.to_json_dict().get('files'),
+                         [("/DATA/aerosol/*/A*.nc", None), ("/DATA/aerosol/*/B*.nc", None)])
+
+        self.assertEqual(self.empty_ds.to_json_dict().get('name'), 'empty')
+        self.assertEqual(self.empty_ds.to_json_dict().get('files'), [])
+
+        self.assertEqual(self.ds3.to_json_dict().get('name'), 'w_temporal_1')
+        self.assertEqual(self.ds3.to_json_dict().get('files'),
+                         [("/DATA/file1.nc", datetime.datetime(2017, 2, 27, 0, 0)),
+                          ("/DATA/file2.nc", datetime.datetime(2017, 2, 28, 0, 0))])
+
+        self.assertEqual(self.ds4.to_json_dict().get('name'), 'w_temporal_2')
+        self.assertEqual(self.ds4.to_json_dict().get('files'), [])
+
+    def test_add_dataset(self):
+        self.ds1.add_dataset('/DATA/ozone2/*/*.nc'),
+        self.assertEqual(self.ds1.to_json_dict().get('files'),
+                         [('/DATA/ozone/*/*.nc', None), ('/DATA/ozone2/*/*.nc', None)])
+
+        self.ds2.add_dataset('/DATA/aerosol/*/B*.nc', datetime.datetime(2017, 2, 27, 0, 0))
+        self.assertEqual(self.ds2.to_json_dict().get('files'),
+                         [("/DATA/aerosol/*/A*.nc", None), ("/DATA/aerosol/*/B*.nc", None)])
+
+        self.ds2.add_dataset('/DATA/aerosol/*/B*.nc', datetime.datetime(2017, 2, 27, 0, 0), True)
+        self.assertEqual(self.ds2.to_json_dict().get('files'),
+                         [("/DATA/aerosol/*/B*.nc", datetime.datetime(2017, 2, 27, 0, 0)),
+                          ("/DATA/aerosol/*/A*.nc", None)])
+
+        self.empty_ds.add_dataset('/DATA/test.nc')
+        self.assertEqual(self.empty_ds.to_json_dict().get('files'), [('/DATA/test.nc', None)])
+
+        self.ds3.add_dataset('/DATA/file_new.nc', datetime.datetime(2017, 2, 26, 0, 0))
+        self.assertEqual(self.ds3.to_json_dict().get('files'),
+                         [("/DATA/file_new.nc", datetime.datetime(2017, 2, 26, 0, 0)),
+                          ("/DATA/file1.nc", datetime.datetime(2017, 2, 27, 0, 0)),
+                          ("/DATA/file2.nc", datetime.datetime(2017, 2, 28, 0, 0))])
+        self.assertEqual(self.ds3.temporal_coverage(), (datetime.datetime(2017, 2, 26, 0, 0),
+                                                        datetime.datetime(2017, 2, 28, 0, 0)))
+
+    def test_open_dataset(self):
+        ds = self._local_data_store.query('local')[0]
+
+        xr = ds.open_dataset()
+        self.assertIsNotNone(xr)
+        self.assertEquals(xr.coords.dims.get('time'), 3)
+
+        xr = ds.open_dataset(time_range=(datetime.datetime(1978, 11, 14),
+                                         datetime.datetime(1978, 11, 15)))
+        self.assertIsNone(xr)
+
+        ds = self._local_data_store.query('local_w_temporal')[0]
+
+        xr = ds.open_dataset()
+        self.assertIsNotNone(xr)
+        self.assertEquals(xr.coords.dims.get('time'), 3)
+
+        xr = ds.open_dataset(time_range=(datetime.datetime(1978, 11, 14),
+                                         datetime.datetime(1978, 11, 15)))
+        self.assertIsNotNone(xr)
+        self.assertEquals(xr.coords.dims.get('time'), 1)
