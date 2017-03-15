@@ -18,6 +18,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+from _threading_local import local
 
 __author__ = "Marco Zühlke (Brockmann Consult GmbH)"
 
@@ -68,14 +69,14 @@ def add_to_data_store_registry():
     DATA_STORE_REGISTRY.add_data_store(data_store)
 
 
-class LocalFilePatternDataSource(DataSource):
-    def __init__(self, name: str, files: Union[Sequence[str], OrderedDict], _data_store: DataStore):
+class LocalFileDataSource(DataSource):
+    def __init__(self, name: str, files: Union[Sequence[str], OrderedDict], data_store: DataStore):
         self._name = name
         if isinstance(files, Sequence):
             self._files = OrderedDict.fromkeys(files)
         else:
             self._files = files
-        self._data_store = _data_store
+        self._data_store = data_store
 
     def open_dataset(self, time_range: Tuple[datetime, datetime] = None,
                      protocol: str = None) -> xr.Dataset:
@@ -94,9 +95,8 @@ class LocalFilePatternDataSource(DataSource):
 
     def add_dataset(self, file, time_stamp: datetime = None, update: bool = False):
         if update or list(self._files.keys()).count(file) == 0:
-            self._files[file] = time_stamp.replace(microsecond=0) if time_stamp else None
-        self._files = OrderedDict(sorted(self._files.items(), key=lambda f: f[1] if f[1] is not None
-                                         else datetime.max))
+            self._files[file] = time_stamp.replace(microsecond=0).replace(tzinfo=None) if isinstance(time_stamp, datetime) else None
+        self._files = OrderedDict(sorted(self._files.items(), key=lambda f: f[1] if f[1] is not None else datetime.max))
 
     def save(self):
         self._data_store.save_data_source(self)
@@ -110,6 +110,14 @@ class LocalFilePatternDataSource(DataSource):
         return None
 
     @property
+    def data_store(self) -> DataStore:
+        return self._data_store
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
     def info_string(self):
         return 'Files: %s' % (' '.join(self._files))
 
@@ -120,13 +128,19 @@ class LocalFilePatternDataSource(DataSource):
                '<tr><td>Files</td><td><strong>%s</strong></td></tr>\n' \
                '</table>\n' % (html.escape(self._name), html.escape(' '.join(self._files)))
 
-    @property
-    def data_store(self) -> DataStore:
-        return self._data_store
+
+class LocalFilePatternDataSource(LocalFileDataSource):
+    def __init__(self, name: str, files: Union[Sequence[str], OrderedDict], data_store: DataStore):
+        super().__init__(name, files, data_store)
 
     @property
-    def name(self) -> str:
-        return self._name
+    def meta_info(self) -> OrderedDict:
+        meta_info = OrderedDict()
+
+        meta_info['protocols'] = self.protocols
+        meta_info['variables'] = self._variables_list()
+
+        return meta_info
 
     def to_json_dict(self):
         """
@@ -142,14 +156,12 @@ class LocalFilePatternDataSource(DataSource):
     @classmethod
     def from_json_dict(cls, json_dicts: dict, data_store: DataStore) -> 'LocalFilePatternDataSource':
         name = json_dicts.get('name')
-        files = json_dicts.get('files', None)
+        files = json_dicts.get('files', OrderedDict())
         if name and isinstance(files, list):
             if len(files) > 0:
                 if isinstance(files[0], list):
                     files = OrderedDict((item[0], parser.parse(item[1]).replace(microsecond=0)
                                          if item[1] is not None else None) for item in files)
-            else:
-                files = OrderedDict()
             return LocalFilePatternDataSource(name, files, data_store)
         return None
 
@@ -242,26 +254,25 @@ class LocalODPSyncedDataStore(DataStore):
         self._store_dir = store_dir
         self._data_sources = None
 
-    def add_opendap_pattern(self, name: str, odp_ecv_name: str, selected_variables: Sequence[str] = None,
-                            time_range: Tuple[int, int] = None,
-                            lat_lon: Tuple[Tuple[float, float], Tuple[float, float]] = None,
-                            local_path: str = None):
+    def add_opendap_pattern(self, name: str, odp_ecv_name: str, local_path: str, meta_info: OrderedDict,
+                            selected_variables: Sequence[str] = None, time_range: Tuple[int, int] = None,
+                            lat_lon: Tuple[Tuple[float, float], Tuple[float, float]] = None):
         self._init_data_sources()
-        data_source = LocalODPSyncedDataSource(name, odp_ecv_name, selected_variables, self, OrderedDict(), time_range, lat_lon,
-                                               local_path)
+        data_source = LocalODPSyncedDataSource(name=name, odp_ecv_name=odp_ecv_name, data_store=self,
+                                               files=OrderedDict(), meta_info=meta_info,
+                                               selected_variables=selected_variables, lat_lon=lat_lon,
+                                               time_range=time_range, source_dir=local_path)
         self._data_sources.append(data_source)
         self._save_data_source(data_source)
 
         return name
 
-    def query(self, name=None, monitor: Monitor = Monitor.NONE) -> Sequence[LocalFilePatternDataSource]:
-        print(name)
+    def query(self, name=None, monitor: Monitor = Monitor.NONE) -> Sequence[DataSource]:
         self._init_data_sources()
         if name:
             result = [ds for ds in self._data_sources if ds.matches_filter(name)]
         else:
             result = self._data_sources
-        print(result)
         return result
 
     def save_data_source(self, data_source):
@@ -317,72 +328,57 @@ class LocalODPSyncedDataStore(DataStore):
         raise TypeError('Not sure how to serialize %s' % (obj,))
 
 
-class LocalODPSyncedDataSource(DataSource):
-    def __init__(self, name: str, odp_ecv_name: str, store_dir: str,  data_store: LocalODPSyncedDataStore,
-                 files: OrderedDict = OrderedDict(),
-                 selected_variables: Sequence[str]= None, time_range: Tuple[int, int] = None,
-                 lat_lon: Tuple[Tuple[float, float], Tuple[float, float]] = None):
-        self._name = name
+class LocalODPSyncedDataSource(LocalFileDataSource):
+    def __init__(self, name: str, odp_ecv_name: str, source_dir: str, data_store: LocalODPSyncedDataStore,
+                 files: OrderedDict = None, meta_info: OrderedDict = None, selected_variables: Sequence[str]= None,
+                 time_range: Tuple[int, int] = None, lat_lon: Tuple[Tuple[float, float], Tuple[float, float]] = None):
+        super().__init__(name=name, files=files, data_store=data_store)
         self._odp_ecv_name = odp_ecv_name
-        self._store_dir = store_dir
+        self._source_dir = source_dir
         self._selected_variables = selected_variables
         self._time_range = time_range
         self._lat_lon = lat_lon
-        self._files = OrderedDict() if files is None else files
-
-        self._data_store = data_store  # type: LocalODPSyncedDataStore
-
-    def open_dataset(self, time_range: Tuple[datetime, datetime] = None,
-                     protocol: str = None) -> xr.Dataset:
-        paths = []
-        if time_range:
-            time_series = list(self._files.values())
-            file_paths = list(self._files.keys())
-            for i in range(len(time_series)):
-                if time_series[i] and time_range[0] <= time_series[i] < time_range[1]:
-                    paths.extend(glob(file_paths[i]))
-        else:
-            for file in self._files.items():
-                paths.extend(glob(file[0]))
-            paths = sorted(set(paths))
-        return open_xarray_dataset(paths)
-
-    def add_dataset(self, file, time_stamp: datetime = None, update: bool = False):
-        print(isinstance(time_stamp, datetime))
-        if update or list(self._files.keys()).count(file) == 0:
-            self._files[file] = time_stamp.replace(microsecond=0) if isinstance(time_stamp, datetime) else None
-        self._files = OrderedDict(sorted(self._files.items(), key=lambda f: f[1] if f[1] is not None
-        else datetime.max))
-
-    def save(self):
-        self._data_store.save_data_source(self)
-
-    def temporal_coverage(self, monitor: Monitor = Monitor.NONE) -> Optional[Tuple[int, int]]:
-        if self._files:
-            cover_min = min(self._files.items(), key=lambda f: f[1] if f[1] is not None else datetime.max)[1]
-            cover_max = max(self._files.items(), key=lambda f: f[1] if f[1] is not None else datetime.min)[1]
-            if cover_min and cover_max:
-                return cover_min, cover_max
-        return None
+        self._meta_info = meta_info if meta_info else OrderedDict()
+        self._compression_level = 9
+        self._compression_enabled = True
 
     @property
-    def info_string(self):
-        return 'Files: %s' % (' '.join(self._files))
-
-    def _repr_html_(self):
-        import html
-        return '<table style="border:0;">\n' \
-               '<tr><td>Name</td><td><strong>%s</strong></td></tr>\n' \
-               '<tr><td>Files</td><td><strong>%s</strong></td></tr>\n' \
-               '</table>\n' % (html.escape(self._name), html.escape(' '.join(self._files)))
+    def meta_info(self) -> OrderedDict:
+        return self._meta_info
 
     @property
-    def data_store(self) -> DataStore:
-        return self._data_store
+    def spatial_coverage(self) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        return self._lat_lon
 
     @property
-    def name(self) -> str:
-        return self._name
+    def selected_variables(self) -> Sequence[str]:
+        return self._selected_variables
+
+    @property
+    def source_dir(self) -> str:
+        return self._source_dir
+
+    @property
+    def odp_ecv_name(self) -> str:
+        return self._odp_ecv_name
+
+    def set_compression_level(self, level):
+        self._compression_level = level
+
+    def get_compression_level(self) -> int:
+        return self._compression_level
+
+    def is_compression_enabled(self) -> bool:
+        return self._compression_enabled
+
+    def enable_compression(self):
+        self._compression_enabled = True
+
+    def disable_compression(self):
+        self._compression_enabled = False
+
+    def update_selected_variables(self, selected_variables: Sequence[str]):
+        self._selected_variables = selected_variables
 
     def to_json_dict(self):
         """
@@ -392,20 +388,39 @@ class LocalODPSyncedDataSource(DataSource):
         """
         fsds_dict = OrderedDict()
         fsds_dict['name'] = self.name
+        fsds_dict['local_meta_info'] = OrderedDict([
+            ('odp_name', self._odp_ecv_name),
+            ('selected_variables', self._selected_variables),
+            ('temporal_coverage', self._time_range),
+            ('spatial_coverage', self._lat_lon),
+            ('source_path', self._source_dir)
+        ])
         fsds_dict['files'] = list(self._files.items())
+        fsds_dict['remote_meta_info'] = self._meta_info
         return fsds_dict
 
     @classmethod
     def from_json_dict(cls, json_dicts: dict, data_store: DataStore) -> 'LocalODPSyncedDataSource':
         name = json_dicts.get('name')
-        files = json_dicts.get('files', None)
+        files = json_dicts.get('files', [])
+        meta_info = json_dicts.get('remote_meta_info', [])
+        local_meta_info = json_dicts.get('local_meta_info', None)
         if name and isinstance(files, list):
-            if len(files) > 0:
-                if isinstance(files[0], list):
-                    files = OrderedDict((item[0], parser.parse(item[1]).replace(microsecond=0)
-                    if item[1] is not None else None) for item in files)
+            if len(files) > 0  and isinstance(files[0], list):
+                files = OrderedDict([(item[0], parser.parse(item[1]).replace(microsecond=0)
+                                    if item[1] else None) for item in files])
             else:
-                files = OrderedDict()
-            return LocalODPSyncedDataSource(name, data_store=data_store, odp_ecv_name=name, lat_lon=None, store_dir='.',
-                                            selected_variables=None, time_range=None, files=OrderedDict())
+                files = OrderedDict(files)
+
+            if local_meta_info:
+                selected_variables = local_meta_info.get('selected_variables')
+                spatial_coverage = local_meta_info.get('spatial_coverage')
+                temporal_coverage = local_meta_info.get('temporal_coverage')
+                source_path = local_meta_info.get('source_path')
+                odp_ecv_name = local_meta_info.get('odp_ecv_name')
+
+            return LocalODPSyncedDataSource(name, odp_ecv_name=odp_ecv_name, source_dir=source_path,
+                                            data_store=data_store, files=files, meta_info=meta_info,
+                                            selected_variables=selected_variables, time_range=temporal_coverage,
+                                            lat_lon=spatial_coverage)
         return None

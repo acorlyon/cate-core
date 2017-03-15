@@ -88,12 +88,15 @@ def save_dataset(ds: xr.Dataset, file: str, format: str = None):
 @op_input('local_path')
 @op_input('compression_enabled')
 @op_input('compression_level')
-def create_local_synced_datasource(name: str, selected_variables: List[str]= None, time_range: Tuple[int, int] = None,
+def create_local_synced_datasource(name: str,
+                                   selected_variables: List[str]= None, time_range: Tuple[int, int] = None,
                                    lat_lon: Tuple[Tuple[float, float], Tuple[float, float]] = None,
-                                   local_datastore_name: str = None, local_path: str = None,
+                                   local_datastore_name: str = None,  local_path: str = None,
                                    compression_enabled: bool = True, compression_level: int = 9,
                                    monitor: Monitor = Monitor.NONE):
     """
+    Creates local datasource containing datasets fetched from OpenDataPortal via OPeNDAP protocol.
+    User can set temporal and spatial coverage and select variables which ought to be stored in datasets.
 
     :param name:
     :param selected_variables:
@@ -106,55 +109,63 @@ def create_local_synced_datasource(name: str, selected_variables: List[str]= Non
     :param monitor:
     :return:
     """
-    from xarray.backends.netCDF4_ import NetCDF4DataStore
     from cate.ds.local import LocalODPSyncedDataStore, get_data_store_path
+    from dateutil.parser import parse
+    from xarray.backends.netCDF4_ import NetCDF4DataStore
 
     local_dstore = DATA_STORE_REGISTRY.get_data_store('synced')  # type: LocalODPSyncedDataStore
     if not isinstance(local_dstore, LocalODPSyncedDataStore):
-        raise TypeError("Couldn't find local data store")
+        raise TypeError("Couldn't initialize local data store")
 
     remote_dstore = DATA_STORE_REGISTRY.get_data_store('esa_cci_odp')  # type: DataStore
-    if not isinstance(local_dstore, DataStore):
-        raise TypeError("Couldn't find remote data store")
+    if not isinstance(remote_dstore, DataStore):
+        raise TypeError("Couldn't initialize remote data store")
 
     remote_dsources = remote_dstore.query(name, monitor)
     if remote_dsources is None or len(remote_dsources) == 0:
-        raise ValueError("Could't find specified data source: {}".format(name))
+        raise ValueError("Could't find remote data source: {}".format(name))
     remote_dsource = remote_dsources[0]  # type: DataSource
 
     if not local_path:
         local_path = get_data_store_path()
 
+    local_dsources = local_dstore.query(local_datastore_name, monitor)
+    if local_dsources:
+        raise ValueError("Could't create local data source: {}".format(local_datastore_name))
+
+    meta_info = {meta_key: meta_value for meta_key, meta_value in remote_dsource.meta_info.items()
+                 if meta_key not in ['protocols']}
+
+    local_dsource_name = local_dstore.add_opendap_pattern(local_datastore_name, name, local_path, meta_info,
+                                                          selected_variables, time_range, lat_lon)
+    local_dsource = local_dstore.query(local_dsource_name, monitor)[0]  # type: LocalODPSyncedDataSource
+
     if compression_enabled:
         encoding_update = {'zlib': True}
+        local_dsource.enable_compression()
         if compression_level:
             encoding_update.setdefault('complevel', compression_level)
-    local_dsources = local_dstore.query(local_datastore_name, monitor)  # type: [DataSource]
-    if local_dsources:
-        raise ValueError("Could't create specified local data source: {}".format(local_datastore_name))
-    local_dsource_name = local_dstore.add_opendap_pattern(local_datastore_name,
-                                                          name, selected_variables, time_range, lat_lon)
-    print("local_dsource_name")
-    print (local_dsource_name)
-    local_dsources = local_dstore.query(local_dsource_name, monitor)  # type: LocalODPSyncedDataSource
+            local_dsource.set_compression_level(compression_level)
 
-    print(local_dsources)
+    remote_dsource_urls = remote_dsource.get_datasets_uri(time_range=time_range, protocol='OPENDAP')
 
-    local_dsource = local_dsources[0]
+    monitor.start(label="Fetching datasets from CCI Open Data Portal", total_work=len(remote_dsource_urls))
 
-    remote_datasets_uri = remote_dsource.get_datasets_uri(time_range=time_range, protocol='OPENDAP')
+    for dataset_uri in remote_dsource_urls:
+        child_monitor = monitor.child(work=1)
 
-    for dataset_uri in remote_datasets_uri:  # type: str
+        file_name = dataset_uri.rsplit('/', 1)[1]
+        child_monitor.start(label=file_name, total_work=len(selected_variables))
 
-        local_filepath = os.path.join(local_path, dataset_uri.rsplit('/', 1)[1])
-        print(local_filepath)
+        local_filepath = os.path.join(local_path, file_name)
         remote_netcdf = NetCDF4DataStore(dataset_uri)
         local_netcdf = NetCDF4DataStore(local_filepath, mode='w', persist=True)
 
         local_netcdf.set_attributes(remote_netcdf.get_attrs())
 
-        if selected_variables is None:
+        if not selected_variables:
             selected_variables = [var_name for var_name in remote_netcdf.variables.keys()]
+            local_dsource.update_selected_variables(selected_variables)
 
         remote_dataset = xr.Dataset.load_store(remote_netcdf)
 
@@ -162,31 +173,155 @@ def create_local_synced_datasource(name: str, selected_variables: List[str]= Non
             remote_dataset = remote_dataset.sel(drop=False,
                                                 lat=slice(lat_lon[0][0], lat_lon[0][1]),
                                                 lon=slice(lat_lon[1][0], lat_lon[1][1]))
-
         for sel_var_name in selected_variables:
-            print(sel_var_name)
             var_dataset = remote_dataset.drop(
                 [var_name for var_name in remote_dataset.variables.keys() if var_name != sel_var_name])
             if compression_enabled:
                 var_dataset.variables.get(sel_var_name).encoding.update(encoding_update)
             local_netcdf.store_dataset(var_dataset)
-            monitor.progress()
+            child_monitor.progress(work=1, msg=sel_var_name)
 
         local_netcdf.sync()
-
         remote_netcdf.close()
-
-        print(local_netcdf.attrs.get('start_time'))
-
-
-        local_dsource.add_dataset(local_filepath, local_netcdf.attrs.get('start_time'))
+        local_dsource.add_dataset(local_filepath, parse(local_netcdf.attrs.get('start_time')))
 
         local_netcdf.close()
+        child_monitor.done()
 
     local_dsource.save()
     monitor.done()
 
     return local_datastore_name
+
+
+# noinspection PyShadowingBuiltins
+@op(tags=['input'])
+@op(tags=['output'], no_cache=True)
+@op_input('name')
+@op_input('update_variables')
+@op_input('selected_variables')
+@op_input('extend_time_range')
+@op_input('time_range')
+def update_local_synced_datasource(name: str,
+                                   update_variables: bool = False, selected_variables: List[str]= None,
+                                   extend_time_range: bool = False, time_range: Tuple[int, int] = None,
+                                   monitor: Monitor = Monitor.NONE):
+    """
+    Updates locally synced ODP datasource containing datasets fetched from OpenDataPortal via OPeNDAP protocol.
+    User can extend temporal coverage and add/remove variables.
+
+    :param name:
+    :param update_variables:
+    :param selected_variables:
+    :param extend_time_range:
+    :param time_range:
+    :param monitor:
+    :return:
+    """
+    from cate.ds.local import LocalODPSyncedDataStore, LocalODPSyncedDataSource, get_data_store_path
+    from dateutil.parser import parse
+    from xarray.backends.netCDF4_ import NetCDF4DataStore
+
+    remote_dstore = DATA_STORE_REGISTRY.get_data_store('esa_cci_odp')  # type: DataStore
+    if not isinstance(remote_dstore, DataStore):
+        raise TypeError("Couldn't initialize remote data store")
+
+    local_dstore = DATA_STORE_REGISTRY.get_data_store('synced')  # type: LocalODPSyncedDataStore
+    if not isinstance(local_dstore, LocalODPSyncedDataStore):
+        raise TypeError("Couldn't initialize local data store")
+    local_dsources = local_dstore.query(name, monitor)  # type: [LocalODPSyncedDataSource]
+    if not local_dsources or len(local_dsources) == 0:
+        raise ValueError("Could't find local data source: {}".format(name))
+    local_dsource = local_dsources[0]  # type: LocalODPSyncedDataSource
+
+    remote_dsources = remote_dstore.query(local_dsource.odp_ecv_name, monitor)
+    if not remote_dsources or len(remote_dsources) == 0:
+        raise ValueError("Could't find local data source: {}".format(name))
+    remote_dsource = remote_dsources[0]
+
+    if local_dsource.is_compression_enabled():
+        encoding_update = {'zlib': True}
+        encoding_update.setdefault('complevel', local_dsource.get_compression_level())
+
+    local_path = local_dsource.source_dir
+
+    if update_variables:
+        remote_dsource_urls = remote_dsource.get_datasets_uri(time_range=local_dsource.temporal_coverage(),
+                                                              protocol='OPENDAP')
+        local_dataset = local_dsource.open_dataset()
+
+        if selected_variables:
+            add_variables = [var_name for var_name in selected_variables
+                             if var_name not in local_dsource.selected_variables]
+            drop_variables = [var_name for var_name in selected_variables
+                              if var_name in local_dsource.selected_variables]
+        else:
+            all_variables = [var_item.get('name') for var_item in local_dsource.get('variables')]
+            add_variables = [var_name for var_name in all_variables
+                             if var_name not in local_dsource.selected_variables]
+            drop_variables = []
+
+        local_dataset = local_dataset.drop(drop_variables)
+
+        # TBC
+
+    elif extend_time_range:
+        if time_range:
+            time_from = time_range[0]
+            time_to = time_range[1]
+        else:
+            time_from = remote_dsource.temporal_coverage()[0]
+            time_to = remote_dsource.temporal_coverage()[1]
+
+        selected_variables = local_dsource.selected_variables
+
+        remote_dsource_urls = remote_dsource.get_datasets_uri(
+                                    time_range=(time_from, local_dsource.temporal_coverage()[0]),
+                                    protocol='OPENDAP') \
+                            + remote_dsource.get_datasets_uri(
+                                    time_range=(local_dsource.temporal_coverage()[1], time_to),
+                                    protocol='OPENDAP')
+
+        monitor.start(label="Fetching datasets from CCI Open Data Portal", total_work=len(remote_dsource_urls))
+
+        for dataset_uri in remote_dsource_urls:
+            child_monitor = monitor.child(work=1)
+
+            file_name = dataset_uri.rsplit('/', 1)[1]
+            child_monitor.start(label=file_name, total_work=len(selected_variables))
+
+            local_filepath = os.path.join(local_path, file_name)
+            remote_netcdf = NetCDF4DataStore(dataset_uri)
+            local_netcdf = NetCDF4DataStore(local_filepath, mode='w', persist=True)
+
+            local_netcdf.set_attributes(remote_netcdf.get_attrs())
+
+            remote_dataset = xr.Dataset.load_store(remote_netcdf)
+
+            if local_dsource.spatial_coverage:
+                remote_dataset = remote_dataset.sel(drop=False,
+                                                lat=slice(local_dsource.spatial_coverage[0][0],
+                                                          local_dsource.spatial_coverage[0][1]),
+                                                lon=slice(local_dsource.spatial_coverage[1][0],
+                                                          local_dsource.spatial_coverage[1][1]))
+            for sel_var_name in selected_variables:
+                var_dataset = remote_dataset.drop(
+                    [var_name for var_name in remote_dataset.variables.keys()
+                     if var_name != sel_var_name])
+                if local_dsource.is_compression_enabled():
+                    var_dataset.variables.get(sel_var_name).encoding.update(encoding_update)
+                local_netcdf.store_dataset(var_dataset)
+                child_monitor.progress(work=1, msg=sel_var_name)
+
+            local_netcdf.sync()
+            remote_netcdf.close()
+            local_dsource.add_dataset(local_filepath, parse(local_netcdf.attrs.get('start_time')))
+
+        local_netcdf.close()
+        child_monitor.done()
+
+    local_dsource.save()
+    monitor.done()
 
 
 # noinspection PyShadowingBuiltins
