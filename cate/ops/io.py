@@ -22,6 +22,7 @@
 import json
 import os.path
 from abc import ABCMeta
+from typing import Optional
 
 import fiona
 import geopandas as gpd
@@ -203,6 +204,24 @@ def read_csv(file: str, **kwargs) -> pd.DataFrame:
     :return: The DataFrame object.
     """
     return pd.read_csv(file, **kwargs)
+
+
+@op(tags=['input'])
+@op_input('path', file_open_mode='r', file_props=["openDirectory"])
+@op_input('vars', data_type=VarNamesLike, default_value=None)
+def read_esdc(path: str, vars: Optional[VarNamesLike.TYPE]) -> xr.Dataset:
+    """
+    Opens an Earth System Data Cube (ESDC) from given directory.
+
+    :param path: Path to an ESDC directory.
+    :param vars: Comma-separated list of variable names.
+    :return: An xarray.Dataset representing the data cube
+    """
+
+    from cablab import Cube
+    vars = VarNamesLike.convert(vars) if vars else None
+    cube = Cube.open(path)
+    return cube.data.dataset(vars)
 
 
 @op(tags=['input'])
